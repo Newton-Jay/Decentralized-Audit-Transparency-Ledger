@@ -1,8 +1,8 @@
-openapi: 3.0.0
+openapi: 3.1.0
 info:
   title: Audit Ledger REST API
   description: REST adapter for Decentralized Audit & Transparency Ledger
-  version: 1.1.0
+  version: 1.2.0
 servers:
   - url: http://localhost:3002/v1
     description: Versioned API (v1)
@@ -16,6 +16,8 @@ tags:
     description: Contract statistics and metrics
   - name: Cache
     description: Cache management and statistics
+  - name: Errors
+    description: RFC 9457 problem details
 
 paths:
   /healthz:
@@ -184,9 +186,11 @@ paths:
         "400":
           description: Invalid filter or pagination parameters
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
 
   /events/search:
     get:
@@ -215,7 +219,7 @@ paths:
         "400":
           description: Invalid filter or pagination parameters
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
@@ -249,13 +253,13 @@ paths:
         "400":
           description: Invalid index parameter
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Event not found
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
@@ -286,7 +290,7 @@ paths:
         "400":
           description: Invalid type or pagination parameters
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
@@ -422,6 +426,27 @@ components:
         default: asc
       description: Sort order (ascending or descending)
 
+  responses:
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
   schemas:
     HealthStatus:
       type: object
@@ -474,6 +499,9 @@ components:
       type: object
       description: An immutable audit event stored on-chain
       properties:
+        id:
+          type: string
+          description: Stable event identifier
         index:
           type: integer
           description: Sequential event index
@@ -496,6 +524,7 @@ components:
           type: string
           description: Hash of the previous event in the chain
       required:
+        - id
         - index
         - timestamp
         - event_type
@@ -545,13 +574,21 @@ components:
 
     ErrorResponse:
       type: object
-      description: Error response
+      description: RFC 9457 problem details response
+      required: [type, title, status, detail]
       properties:
-        error:
+        type:
           type: string
-          description: Human-readable error message
-        details:
-          type: array
-          items:
-            type: string
-          description: List of specific validation failures
+          format: uri-reference
+          default: about:blank
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference

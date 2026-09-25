@@ -14,7 +14,7 @@ import {
   ExportFilter,
 } from "./export";
 import { validateKey, generateKey, revokeKey, listKeys, type Role } from "./keys";
-import { decodeCursor, encodeCursor, setPaginationHeaders, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "./pagination";
+import { decodeCursor, encodeCursor, setPaginationHeaders } from "./pagination";
 import {
   securityHeaders,
   cspMiddleware,
@@ -30,6 +30,7 @@ import {
 } from "@audit-ledger/security";
 import { authorizationServer, OAUTH_ISSUER, wafRuleEngine, createConfiguredRateLimitStore } from "./security";
 import { createComplianceRouter } from "./compliance";
+import { EventFilterSchema, EventTypeParamSchema, IndexParamSchema, PaginationSchema } from "./validation";
 
 const app = express();
 const port = process.env.PORT || 3002;
@@ -134,6 +135,30 @@ function parseLimit(raw: string | undefined): number {
   return Math.min(parsed, MAX_PAGE_SIZE);
 }
 
+function problem(res: express.Response, status: number, title: string, detail: string, type = "about:blank") {
+  return res.status(status).type("application/problem+json").json({ type, title, status, detail });
+}
+
+function parseEventFilter(req: express.Request): { value: Record<string, unknown> | null } | { error: string } {
+  const query = req.query as Record<string, unknown>;
+  const filter: Record<string, unknown> = {};
+  for (const key of ["type", "submitter", "metadata", "startTime", "endTime"] as const) {
+    if (query[key] !== undefined) filter[key] = query[key];
+  }
+  const raw = query.filter ?? (Object.keys(filter).length ? filter : undefined);
+  if (raw === undefined) return { value: null };
+  const candidate = typeof raw === "string"
+    ? raw
+    : JSON.stringify({
+        ...(typeof raw === "object" ? raw : {}),
+        ...filter,
+        ...(filter.startTime !== undefined ? { startTime: Number(filter.startTime) } : {}),
+        ...(filter.endTime !== undefined ? { endTime: Number(filter.endTime) } : {}),
+      });
+  const parsed = EventFilterSchema.safeParse(candidate);
+  return parsed.success ? { value: parsed.data as Record<string, unknown> | null } : { error: parsed.error.issues[0]?.message ?? "invalid filter" };
+}
+
 // ── Health Check Endpoints (#268) ─────────────────────────────────────────────
 
 const startTime = Date.now();
@@ -218,14 +243,18 @@ const v1 = express.Router();
 
 // GET /events - List all events with pagination
 v1.get("/events", (req, res) => {
-  const limit = parseLimit(req.query.limit as string);
-  const filter = req.query.filter ? JSON.parse(req.query.filter as string) : null;
+  const pagination = PaginationSchema.safeParse({ limit: req.query.limit, offset: req.query.cursor ? undefined : req.query.offset });
+  if (!pagination.success) return problem(res, 400, "Invalid pagination", pagination.error.issues[0]?.message ?? "limit or offset is invalid");
+  const limit = pagination.data.limit;
+  const parsedFilter = parseEventFilter(req);
+  if ("error" in parsedFilter) return problem(res, 400, "Invalid filter", parsedFilter.error);
+  const filter = parsedFilter.value;
 
-  let offset = 0;
+  let offset = pagination.data.offset;
   if (req.query.cursor) {
     const decoded = decodeCursor(req.query.cursor as string);
     if (!decoded) {
-      return res.status(400).json({ error: "Invalid cursor" });
+      return problem(res, 400, "Invalid cursor", "cursor is malformed or unsupported");
     }
     offset = decoded.index;
   }
@@ -243,21 +272,15 @@ v1.get("/events", (req, res) => {
 
 // GET /events/:index - Get event by index
 v1.get("/events/:index", (req, res) => {
-  const index = parseInt(req.params.index);
-  if (isNaN(index) || index < 0) {
-    return res.status(400).json({ error: "index must be a non-negative integer" });
-  }
+  const parsedIndex = IndexParamSchema.safeParse({ index: req.params.index });
+  if (!parsedIndex.success) return problem(res, 400, "Invalid index", "index must be a non-negative integer");
+  const index = parsedIndex.data.index;
 
   const ctx = resolveContext(req);
   const result = resolvers.Query.event(null, { index }, ctx);
 
     if (!result) {
-      return res.status(404).json({
-        error: {
-          code: "NOT_FOUND",
-          message: `Event with index ${index} not found`,
-        },
-      });
+      return problem(res, 404, "Event not found", `event with index ${index} was not found`);
     }
     res.json({ data: result });
   }
@@ -265,15 +288,16 @@ v1.get("/events/:index", (req, res) => {
 
 // GET /events/type/:type - Get events by type with pagination
 v1.get("/events/type/:type", (req, res) => {
-  const type = req.params.type;
-  const limit = parseLimit(req.query.limit as string);
-
-  let offset = 0;
+  const parsedType = EventTypeParamSchema.safeParse({ type: req.params.type });
+  const pagination = PaginationSchema.safeParse({ limit: req.query.limit, offset: req.query.cursor ? undefined : req.query.offset });
+  if (!parsedType.success) return problem(res, 400, "Invalid event type", parsedType.error.issues[0]?.message ?? "type is invalid");
+  if (!pagination.success) return problem(res, 400, "Invalid pagination", pagination.error.issues[0]?.message ?? "limit or offset is invalid");
+  const type = parsedType.data.type;
+  const limit = pagination.data.limit;
+  let offset = pagination.data.offset;
   if (req.query.cursor) {
     const decoded = decodeCursor(req.query.cursor as string);
-    if (!decoded) {
-      return res.status(400).json({ error: "Invalid cursor" });
-    }
+    if (!decoded) return problem(res, 400, "Invalid cursor", "cursor is malformed or unsupported");
     offset = decoded.index;
   }
 
@@ -432,6 +456,15 @@ app.get("/events/type/:type", (req, res) => {
 });
 app.get("/stats", (_req, res) => {
   res.redirect(301, "/v1/stats");
+});
+
+// Consistent JSON errors for malformed requests and unexpected failures.
+app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (error instanceof SyntaxError && "body" in error) {
+    return problem(res, 400, "Malformed JSON", "request body must contain valid JSON");
+  }
+  console.error("Unhandled REST error", error);
+  return problem(res, 500, "Internal Server Error", "an unexpected error occurred");
 });
 
 if (require.main === module) {
