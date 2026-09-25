@@ -79,6 +79,16 @@ export const resolvers = {
         : governanceEvents;
       return filtered.slice(offset, offset + limit);
     },
+
+    _service: () => ({ sdl: typeDefs }),
+    _entities: (_: any, { representations }: { representations: Array<{ __typename?: string; id?: string }> }) =>
+      representations
+        .filter((representation) => representation.__typename === "Event" && typeof representation.id === "string")
+        .map((representation) => events.find((event) => event.id === representation.id) ?? null),
+  },
+
+  Event: {
+    __resolveReference: (reference: { id: string }) => events.find((event) => event.id === reference.id) ?? null,
   },
 
   Mutation: {

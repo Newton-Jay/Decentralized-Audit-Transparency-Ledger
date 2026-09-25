@@ -6,7 +6,13 @@ export const typeDefs = `
   & Transparency Ledger. Each event is linked to its predecessor via
   \`prev_hash\`, forming a tamper-evident hash chain.
   """
-  type Event {
+  directive @key(fields: _FieldSet!) repeatable on OBJECT | INTERFACE
+  directive @extends on OBJECT | INTERFACE
+  directive @external on FIELD_DEFINITION
+  directive @requires(fields: _FieldSet!) on FIELD_DEFINITION
+  directive @provides(fields: _FieldSet!) on FIELD_DEFINITION
+
+  type Event @key(fields: "id") {
     """Content-addressed identifier (hex-encoded SHA-256)."""
     id: String!
     """Sequential index assigned when the event was logged."""
@@ -199,6 +205,9 @@ export const typeDefs = `
     \`\`\`
     """
     governanceHistory(types: [String!], limit: Int = 50, offset: Int = 0): [GovernanceEvent!]!
+
+    _service: _Service!
+    _entities(representations: [_Any!]!): [_Entity]!
   }
 
   type Mutation {
@@ -267,6 +276,16 @@ export const typeDefs = `
   such as the \`eventsByType\` map in contract statistics.
   """
   scalar JSON
+
+  scalar _FieldSet
+
+  type _Service {
+    sdl: String
+  }
+
+  union _Entity = Event
+
+  scalar _Any
 `;
 
 export const schema = makeExecutableSchema({ typeDefs });
