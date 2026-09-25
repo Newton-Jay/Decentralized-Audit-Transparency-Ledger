@@ -356,3 +356,8 @@ This project follows security best practices:
 
 
 [MIT](LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-419 -->
+- #419: Implement event retention policies with automated enforcement

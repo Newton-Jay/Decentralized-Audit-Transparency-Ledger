@@ -69,6 +69,7 @@ nav:
       - Event Policy-as-Code Guide: docs/compliance/contract-event-compliance-guide.md
   - API & SDK Reference:
       - API Reference: docs/api-reference.md
+      - Versioning & Deprecation: docs/api-versioning.md
       - SDK Reference: docs/api-sdk-reference/index.md
   - Architecture Decision Records:
       - Index: docs/adr/ADR-001-append-only-log.md

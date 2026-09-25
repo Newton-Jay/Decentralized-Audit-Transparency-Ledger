@@ -1,5 +1,6 @@
 import { PubSub, withFilter } from "graphql-subscriptions";
 import { requireRole, Role } from "./auth";
+import { deliverEvent } from "../../rest/src/webhooks";
 
 export const pubsub = new PubSub();
 export const EVENT_LOGGED = "EVENT_LOGGED";
@@ -29,11 +30,11 @@ const governanceEvents: GovernanceEventRecord[] = [];
 
 function matchesFilter(e: EventRecord, filter: any): boolean {
   if (!filter) return true;
-  if (filter.type && e.event_type !== filter.type) return false;
-  if (filter.submitter && !e.submitter.includes(filter.submitter)) return false;
-  if (filter.metadata && !e.metadata.includes(filter.metadata)) return false;
-  if (filter.startTime && e.timestamp < filter.startTime) return false;
-  if (filter.endTime && e.timestamp > filter.endTime) return false;
+  if (filter.type && e.event_type.toLowerCase() !== filter.type.toLowerCase()) return false;
+  if (filter.submitter && !e.submitter.toLowerCase().includes(filter.submitter.toLowerCase())) return false;
+  if (filter.metadata && !e.metadata.toLowerCase().includes(filter.metadata.toLowerCase())) return false;
+  if (filter.startTime != null && e.timestamp < filter.startTime) return false;
+  if (filter.endTime != null && e.timestamp > filter.endTime) return false;
   return true;
 }
 
@@ -100,6 +101,9 @@ export const resolvers = {
       };
       events.push(ev);
       void pubsub.publish(EVENT_LOGGED, { eventLogged: ev });
+      void deliverEvent(ev).catch((error) => {
+        console.error("Webhook delivery failed", error);
+      });
 
       // Track governance actions in the governance history
       const GOVERNANCE_TYPES = new Set([
@@ -122,18 +126,31 @@ export const resolvers = {
   Subscription: {
     eventLogged: {
       subscribe: withFilter(
-        () => pubsub.asyncIterableIterator(EVENT_LOGGED),
+        (_root: unknown, _args: unknown, context: { role?: Role; subscriptionAuthRequired?: boolean }) => {
+          if (context?.subscriptionAuthRequired) {
+            requireRole(context, Role.Viewer);
+          }
+          return pubsub.asyncIterableIterator(EVENT_LOGGED);
+        },
         (
           payload: { eventLogged: EventRecord } | undefined,
-          variables: { type?: string; submitter?: string; startTime?: number; endTime?: number } | undefined,
+          variables: {
+            filter?: Record<string, unknown>
+            type?: string
+            submitter?: string
+            startTime?: number
+            endTime?: number
+          } | undefined,
+          _context: unknown,
         ) => {
           if (!payload) return false;
-          const evt = payload.eventLogged;
-          if (variables?.type && evt.event_type !== variables.type) return false;
-          if (variables?.submitter && !evt.submitter.includes(variables.submitter)) return false;
-          if (variables?.startTime != null && evt.timestamp < variables.startTime) return false;
-          if (variables?.endTime != null && evt.timestamp > variables.endTime) return false;
-          return true;
+          return matchesFilter(payload.eventLogged, {
+            ...(variables?.filter ?? {}),
+            ...(variables?.type ? { type: variables.type } : {}),
+            ...(variables?.submitter ? { submitter: variables.submitter } : {}),
+            ...(variables?.startTime != null ? { startTime: variables.startTime } : {}),
+            ...(variables?.endTime != null ? { endTime: variables.endTime } : {}),
+          });
         }
       ),
     },

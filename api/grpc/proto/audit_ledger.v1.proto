@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package auditledger.v1;
+
+service AuditLedger {
+  rpc GetEvent(GetEventRequest) returns (Event);
+  rpc StreamEvents(StreamEventsRequest) returns (stream Event);
+  rpc ExchangeEvents(stream StreamRequest) returns (stream StreamResponse);
+}
+
+message Event {
+  uint32 index = 1;
+  uint64 timestamp = 2;
+  string event_type = 3;
+  string category = 4;
+  string submitter = 5;
+  bytes metadata = 6;
+  string event_hash = 7;
+  string prev_hash = 8;
+  uint32 version = 9;
+  string parent_event_id = 10;
+}
+
+message GetEventRequest {
+  uint32 index = 1;
+}
+
+message StreamEventsRequest {
+  uint32 after_index = 1;
+  bool replay_all = 2;
+  string type = 3;
+  string submitter = 4;
+}
+
+message SubscribeRequest {
+  uint32 after_index = 1;
+  bool replay_all = 2;
+  string type = 3;
+  string submitter = 4;
+}
+
+message Ack {
+  string message_id = 1;
+}
+
+message UnsubscribeRequest {
+  string subscription_id = 1;
+}
+
+message StreamRequest {
+  string subscription_id = 1;
+  oneof payload {
+    SubscribeRequest subscribe = 2;
+    Ack ack = 3;
+    UnsubscribeRequest unsubscribe = 4;
+  }
+}
+
+message AckResponse {
+  string subscription_id = 1;
+  string message_id = 2;
+  string action = 3;
+}
+
+message ErrorResponse {
+  string subscription_id = 1;
+  string code = 2;
+  string message = 3;
+}
+
+message StreamResponse {
+  oneof payload {
+    Event event = 1;
+    AckResponse ack = 2;
+    ErrorResponse error = 3;
+  }
+}

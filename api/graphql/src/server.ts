@@ -37,7 +37,18 @@ async function main() {
     ws.on("close", () => activeConnections.delete(ws));
   });
 
-  const cleanup = useServer({ schema }, wsServer);
+  const cleanup = useServer(
+    {
+      schema,
+      context: (ctx) => {
+        const connectionParams = (ctx.connectionParams ?? {}) as Record<string, string>;
+        const apiKey = connectionParams["x-api-key"] ?? connectionParams.authorization?.replace("Bearer ", "");
+        const record = apiKey ? validateKey(apiKey) : null;
+        return { apiKey, role: record?.role, subscriptionAuthRequired: true };
+      },
+    },
+    wsServer,
+  );
 
   const apollo = new ApolloServer({
     schema,

@@ -233,6 +233,35 @@ fn test_batch_log_events_logs_each_event_atomically() {
 }
 
 #[test]
+fn test_batch_log_events_persists_rate_limit_usage() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    client.set_submitter_rate_limit(&owner, &submitter, &2);
+
+    let events = soroban_sdk::vec![
+        &env,
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"a")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"b")),
+    ];
+    let indices = client.log_events(&events);
+    assert_eq!(indices.len(), 2);
+
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"c"),
+        &None,
+        &None,
+        &false,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_batch_log_events_exceeds_type_cap_reverts() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);

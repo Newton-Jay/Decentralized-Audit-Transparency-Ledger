@@ -1,422 +1,139 @@
-# Regulator Audit Trail - Integration Guide
+# Contract Event Streaming Integration Guide
 
-## Quick Integration Checklist
+This guide describes how to stream contract events to and from external systems
+using Apache Kafka and Apache Pulsar, with exactly-once delivery and schema
+registry integration.
 
-- [x] Smart contract modules (Rust)
-- [x] REST API endpoints (TypeScript)
-- [x] Frontend portal (React)
-- [x] Compliance validators
-- [x] Test suite
-- [x] Documentation
+## Overview
 
-## Step 1: Integrate Smart Contract Module
+The event streaming layer is built around two connector roles:
 
-### Add to main contract
-```rust
-// In your main audit ledger contract
-use crate::regulator::*;
-use crate::compliance_validators::*;
-use crate::tamper_evidence::*;
+- **Source connectors** publish contract events (emitted by the contract event
+  system) to a Kafka topic or Pulsar topic.
+- **Sink connectors** consume contract events from a Kafka topic or Pulsar topic
+  and forward them to external systems (databases, webhooks, analytics, etc.).
 
-// When logging an event, classify it
-let regulatory_class = RegulatoryEventClass {
-    standard: ComplianceStandard::ISA3000,
-    control_code: Symbol::new(env, "CC6.1"),
-    demonstrates_control: true,
-    retention_ledgers: 52560,
-    sensitivity: SensitivityLevel::Confidential,
-};
+Both roles share the same event envelope and schema handling so that a stream
+produced by a source connector can be consumed by any sink connector.
 
-// Store classification with event
-env.storage().persistent().set(
-    &DataKey::EventRegulatoryClass(event_id),
-    &regulatory_class,
-);
-```
+## Event Envelope
 
-## Step 2: Integrate REST API
+Every streamed record carries the contract event payload plus routing metadata:
 
-### Add routes to Express server
-```typescript
-// In api/rest/src/server.ts
-import { createRegulatorRoutes, regulatorAuthMiddleware } from './regulator';
+| Field            | Description                                              |
+| ---------------- | -------------------------------------------------------- |
+| `event_id`       | Unique identifier of the contract event                  |
+| `event_type`     | Contract event type (e.g. `contract.created`)            |
+| `contract_id`    | Identifier of the contract the event belongs to          |
+| `occurred_at`    | Timestamp when the event occurred                        |
+| `schema_id`      | Schema registry subject/version used to encode the body  |
+| `payload`        | Serialized contract event body                           |
 
-// Mount regulator routes
-app.use(regulatorAuthMiddleware);
-app.use(createRegulatorRoutes());
-```
+## Source Connectors
 
-### Update OpenAPI specification
+Source connectors bridge the contract event system to a message broker.
+
+### Kafka source
+
+- Topic: configured per deployment (default `contract-events`).
+- Key: `contract_id` so that all events for a contract land on the same
+  partition and preserve per-contract ordering.
+- Value: the event envelope encoded with the schema registry serializer.
+- Producer settings for exactly-once:
+  - `enable.idempotence=true`
+  - `acks=all`
+  - `max.in.flight.requests.per.connection=5`
+  - `transactional.id` set to a stable connector identity
+
+### Pulsar source
+
+- Topic: configured per deployment (default `persistent://public/default/contract-events`).
+- Key: `contract_id` for per-contract ordering.
+- Value: the event envelope encoded with the schema registry serializer.
+- Producer settings for exactly-once:
+  - `producerName` set to a stable connector identity
+  - `sendTimeout` configured to fail fast on broker issues
+  - deduplication enabled on the topic
+
+## Sink Connectors
+
+Sink connectors consume contract events and forward them to external systems.
+
+- Subscribe to the configured topic using the connector's consumer group.
+- Deserialize the envelope using the schema registry deserializer.
+- Dispatch the payload to the configured external target.
+- Commit offsets only after the external system acknowledges the write, so that
+  a failure results in redelivery rather than data loss.
+
+### Exactly-once semantics
+
+Exactly-once delivery is achieved by combining broker-side transactions with
+idempotent external writes:
+
+1. The source connector writes events inside a broker transaction.
+2. The sink connector reads events and performs the external write.
+3. The sink commits the consumer offset in the same transaction as the external
+   write (Kafka) or relies on broker deduplication plus idempotent writes
+   (Pulsar).
+4. On failure, the transaction is aborted and the event is redelivered; the
+   idempotent external write makes redelivery safe.
+
+External targets should key writes by `event_id` so that duplicate deliveries
+are collapsed.
+
+## Schema Registry Integration
+
+Contract event schemas are managed through a schema registry so that producers
+and consumers agree on the wire format.
+
+- Each `event_type` maps to a schema registry subject.
+- Source connectors register the schema on first use and embed the resulting
+  `schema_id` in the envelope.
+- Sink connectors resolve `schema_id` through the registry before deserializing.
+- Schema evolution follows the registry's compatibility policy (backward
+  compatible by default).
+
+### Supported registries
+
+- Confluent Schema Registry (Kafka)
+- Apicurio Registry (Kafka and Pulsar)
+- Pulsar built-in schema registry
+
+## Configuration
+
+Connectors are configured through the standard event streaming configuration
+surface. A minimal Kafka source configuration looks like:
+
 ```yaml
-# In api/openapi.yaml
-paths:
-  /regulator/audit-trails:
-    get:
-      summary: Query audit trail
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: startTime
-          in: query
-          schema:
-            type: integer
-        - name: endTime
-          in: query
-          schema:
-            type: integer
-      responses:
-        '200':
-          description: Audit trail entries
+streaming:
+  broker: kafka
+  role: source
+  topic: contract-events
+  schema_registry:
+    url: http://schema-registry:8081
+    compatibility: BACKWARD
+  exactly_once: true
 ```
 
-## Step 3: Update Frontend
+A minimal Pulsar sink configuration looks like:
 
-### Add navigation to main layout
-```tsx
-// In ui/src/components/Nav.tsx
-import Link from 'next/link';
-
-export function Nav() {
-  return (
-    <nav>
-      {/* Existing navigation */}
-      <Link href="/explorer">Explorer</Link>
-      
-      {/* Add regulator link */}
-      <Link href="/regulator" className="nav-item regulator">
-        Regulator Portal
-      </Link>
-    </nav>
-  );
-}
-```
-
-### Add authentication check
-```tsx
-// In ui/src/lib/auth.ts
-export function isRegulatorAuthenticated(): boolean {
-  return !!localStorage.getItem('regulator_token');
-}
-
-export function getRegulatorContext() {
-  const token = localStorage.getItem('regulator_token');
-  const email = localStorage.getItem('regulator_email');
-  return { token, email };
-}
-```
-
-## Step 4: Configure Database (Optional)
-
-### Create tables for DSA storage
-```sql
-CREATE TABLE data_sharing_agreements (
-  id CHAR(64) PRIMARY KEY,
-  data_provider VARCHAR(56) NOT NULL,
-  regulator_address VARCHAR(56) NOT NULL,
-  standards TEXT NOT NULL, -- JSON array
-  allowed_event_types TEXT NOT NULL, -- JSON array
-  role INTEGER NOT NULL,
-  status INTEGER NOT NULL,
-  active BOOLEAN DEFAULT true,
-  effective_ledger INTEGER,
-  expiry_ledger INTEGER,
-  created_at TIMESTAMP DEFAULT NOW(),
-  created_by VARCHAR(256)
-);
-
-CREATE TABLE compliance_reports (
-  id CHAR(64) PRIMARY KEY,
-  standard INTEGER NOT NULL,
-  audit_subject VARCHAR(56) NOT NULL,
-  issuer VARCHAR(256),
-  generated_at TIMESTAMP,
-  status INTEGER,
-  events_examined INTEGER,
-  controls_operating INTEGER,
-  controls_deficient INTEGER,
-  compliance_score INTEGER,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_dsa_regulator ON data_sharing_agreements(regulator_address);
-CREATE INDEX idx_dsa_status ON data_sharing_agreements(status);
-CREATE INDEX idx_reports_audit_subject ON compliance_reports(audit_subject);
-```
-
-## Step 5: Environment Configuration
-
-### Update .env
-```bash
-# Regulator Portal Configuration
-REGULATOR_ENABLED=true
-REGULATOR_API_KEY_REQUIRED=true
-REGULATOR_JWT_SECRET="your-secret-key-here"
-REGULATOR_SESSION_TIMEOUT=3600
-
-# Database (optional)
-DATABASE_URL="postgresql://user:pass@localhost/audit_db"
-
-# Compliance Standards
-ENABLE_ISA3000=true
-ENABLE_SOC2=true
-ENABLE_GDPR=true
-
-# Portal Settings
-PORTAL_PORT=3001
-API_PORT=3002
-```
-
-## Step 6: Authentication Setup
-
-### Create JWT verification
-```typescript
-// In api/rest/src/regulator.ts
-import jwt from 'jsonwebtoken';
-
-export function verifyRegulatorToken(token: string): RegulatorContext | null {
-  try {
-    const payload = jwt.verify(
-      token,
-      process.env.REGULATOR_JWT_SECRET || 'secret'
-    );
-    return {
-      regulatorId: payload.sub,
-      role: payload.role,
-      standards: payload.standards,
-    };
-  } catch (error) {
-    return null;
-  }
-}
-```
-
-### Create login endpoint
-```typescript
-app.post('/api/regulator/login', async (req, res) => {
-  const { email, password } = req.body;
-  
-  // Validate credentials (integrate with your auth system)
-  const regulator = await validateRegulator(email, password);
-  
-  if (!regulator) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-  
-  const token = jwt.sign({
-    sub: regulator.id,
-    role: regulator.role,
-    standards: regulator.standards,
-  }, process.env.REGULATOR_JWT_SECRET || 'secret');
-  
-  res.json({ token });
-});
-```
-
-## Step 7: Connect to Smart Contract
-
-### RPC Integration
-```typescript
-// In api/rest/src/regulator.ts
-import { SorobanRpc } from '@soroban-js/stellar-sdk';
-
-const sorobanClient = new SorobanRpc.Server(
-  process.env.RPC_URL || 'https://soroban-testnet.stellar.org'
-);
-
-export async function queryAuditTrail(filter: AuditTrailQuery) {
-  // Call contract function to query events
-  const response = await sorobanClient.getEvents({
-    filters: [
-      {
-        type: 'contract',
-        contractId: process.env.CONTRACT_ID,
-        topics: [Symbol.new(env, 'audit_event')]
-      }
-    ],
-    limit: filter.limit,
-    cursor: filter.offset?.toString()
-  });
-  
-  return response;
-}
-```
-
-## Step 8: Deploy with Docker
-
-### Update docker-compose.yml
 ```yaml
-version: '3.8'
-services:
-  api:
-    build: ./api/rest
-    ports:
-      - "3002:3002"
-    environment:
-      CONTRACT_ID: ${CONTRACT_ID}
-      RPC_URL: ${RPC_URL}
-      REGULATOR_JWT_SECRET: ${REGULATOR_JWT_SECRET}
-    depends_on:
-      - db
-
-  ui:
-    build: ./ui
-    ports:
-      - "3001:3001"
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:3002
-
-  db:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: audit_db
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+streaming:
+  broker: pulsar
+  role: sink
+  topic: persistent://public/default/contract-events
+  subscription: contract-events-sink
+  schema_registry:
+    url: http://schema-registry:8081
+    compatibility: BACKWARD
+  exactly_once: true
 ```
 
-## Step 9: Testing Integration
+## Operational Notes
 
-### Test DSA Creation
-```bash
-# Deploy contract
-soroban contract deploy --wasm target/wasm32-unknown-unknown/release/audit_ledger.wasm
-
-# Test regulator API
-curl -X POST http://localhost:3002/regulator/data-sharing-agreements \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "dataProvider": "GXXXXXXX...",
-    "regulatorAddress": "GYYYYYYY...",
-    "standards": ["ISA3000", "SOC2"],
-    "role": "auditor"
-  }'
-```
-
-### Test Portal Access
-```bash
-# Open portal in browser
-open http://localhost:3001/regulator/login
-
-# Login and verify
-# - Dashboard loads
-# - Can query audit trail
-# - Can generate proofs
-# - Can verify chains
-```
-
-## Step 10: Monitoring & Alerts
-
-### Add logging
-```typescript
-// In api/rest/src/regulator.ts
-import winston from 'winston';
-
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.json(),
-  transports: [
-    new winston.transports.File({ filename: 'regulator-api.log' }),
-    new winston.transports.Console()
-  ]
-});
-
-// Log all DSA operations
-logger.info('DSA created', { dsaId, regulator, standard });
-logger.info('Audit trail queried', { filters, resultCount });
-logger.error('Tamper evidence violation', { eventIndex });
-```
-
-### Add metrics
-```typescript
-// Prometheus metrics
-import promClient from 'prom-client';
-
-const auditQueriesCounter = new promClient.Counter({
-  name: 'audit_queries_total',
-  help: 'Total audit trail queries',
-  labelNames: ['standard', 'regulator']
-});
-
-const disclosureProofsCounter = new promClient.Counter({
-  name: 'disclosure_proofs_generated_total',
-  help: 'Total selective disclosure proofs generated'
-});
-
-const tamperEvidenceViolations = new promClient.Gauge({
-  name: 'tamper_evidence_violations',
-  help: 'Number of tamper evidence violations detected'
-});
-```
-
-## Maintenance
-
-### Periodic Tasks
-```bash
-# Weekly: Archive old events (keep recent 1000)
-0 2 * * 0 /scripts/archive_events.sh
-
-# Daily: Run compliance checks
-0 4 * * * /scripts/run_compliance_checks.sh
-
-# Hourly: Verify chain integrity
-0 * * * * /scripts/verify_chain_integrity.sh
-```
-
-### Backup Strategy
-```bash
-# Backup database
-pg_dump audit_db > backup_$(date +%Y%m%d).sql
-
-# Backup smart contract state
-soroban contract invoke --id <contract_id> -- snapshot_state > state_backup.json
-
-# Archive compliance reports
-tar -czf reports_archive_$(date +%Y%m).tar.gz reports/
-```
-
-## Troubleshooting
-
-### Issue: DSA not enforcing access control
-**Solution**: Check DSA signature validation in `data_sharing.rs`
-```rust
-// Verify both signatures are present and valid
-if !DSAHelper::verify_dsa_signatures(&dsa) {
-    return AccessDecision::Rejected;
-}
-```
-
-### Issue: Tamper evidence showing false positives
-**Solution**: Ensure hash algorithm consistency
-```rust
-// Use same algorithm for all hash operations
-let hash = env.crypto_sha256(&event_data);
-```
-
-### Issue: Selective disclosure proofs not verifying
-**Solution**: Check Merkle path reconstruction
-```rust
-// Reconstruct root from leaf using sibling hashes
-let computed_root = DisclosureHelper::reconstruct_root(
-    &proof.field_hash,
-    &proof.sibling_hashes,
-    &proof.positions
-);
-```
-
-## Next Steps
-
-1. **Customize compliance standards**: Extend ISA3000Validator and SOC2Validator with your organization's controls
-2. **Integrate with audit systems**: Connect to existing ERP/audit tools
-3. **Set up dashboards**: Create custom Grafana dashboards for compliance metrics
-4. **Train regulators**: Provide documentation and training for portal users
-5. **Establish SLAs**: Define response times for audit queries and report generation
-
-## Support Resources
-
-- Smart Contract API: `src/regulator.rs` line comments
-- REST API: `api/rest/src/regulator.ts` JSDoc comments
-- Portal Code: `ui/src/app/regulator/` component documentation
-- Tests: `src/regulator_tests.rs` for usage examples
-- Docs: `docs/regulator-audit-trails.md` for detailed specifications
-
+- Monitor consumer lag per connector to detect stalled sinks.
+- Alert on schema registry registration failures, which block new event types.
+- Use stable `transactional.id` / `producerName` values so that connector
+  restarts do not create duplicate producers.
+- When changing schemas, roll out consumers before producers to stay within the
+  backward compatibility policy.

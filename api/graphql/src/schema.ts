@@ -227,39 +227,37 @@ export const typeDefs = `
 
   type Subscription {
     """
-    Subscribe to real-time event notifications. Optionally filter
-    by event type. When no type is provided, all events are pushed.
+    Subscribe to real-time event notifications. All supplied filters must
+    match (AND logic). When no filter is provided, all events are pushed.
+    Authentication is required when using the network server; local in-memory
+    schemas can opt out for tests.
 
-    **Example (subscribe to all events):**
+    **Example (subscribe with advanced filters):**
     \`\`\`graphql
-    subscription {
-      eventLogged {
+    subscription($filter: EventFilter) {
+      eventLogged(filter: $filter) {
         index
         event_type
         submitter
+        metadata
         timestamp
         event_hash
       }
     }
     \`\`\`
 
-    **Example (subscribe to a specific type):**
-    \`\`\`graphql
-    subscription {
-      eventLogged(type: "governance") {
-        index
-        event_type
-        submitter
-        metadata
-      }
-    }
-    \`\`\`
-
     **WebSocket transport:**
     Connect to \`ws://localhost:4000/graphql\` with the \`graphql-ws\`
-    protocol, then send the subscription query over the socket.
+    protocol, then send the subscription query over the socket. Pass the API
+    key as \`connectionParams: { "x-api-key": "<key>" }\`.
     """
-    eventLogged(type: String): Event!
+    eventLogged(
+      filter: EventFilter
+      type: String
+      submitter: String
+      startTime: Int
+      endTime: Int
+    ): Event!
   }
 
   """

@@ -11,6 +11,7 @@ const NAV = [
   { href: "/search", label: "Search" },
   { href: "/export", label: "Export" },
   { href: "/governance", label: "Governance" },
+  { href: "/webhooks", label: "Webhooks" },
 ];
 
 const THEME_ORDER: Array<"dark" | "light" | "system"> = ["dark", "light", "system"];

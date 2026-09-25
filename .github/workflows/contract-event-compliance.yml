@@ -17,6 +17,19 @@ on:
     # Run continuous compliance audit evaluation daily at midnight UTC
     - cron: '0 0 * * *'
   workflow_dispatch:
+    inputs:
+      replay-from-ledger:
+        description: 'Replay contract events from ledger history'
+        type: boolean
+        default: false
+      replay-workers:
+        description: 'Number of parallel replay workers'
+        type: string
+        default: '4'
+      replay-checkpoint:
+        description: 'Checkpoint file for resumable replay'
+        type: string
+        default: 'docs/compliance/reports/replay-checkpoint.json'
 
 jobs:
   policy-tests:
@@ -35,10 +48,40 @@ jobs:
         run: |
           opa test policies/compliance/ -v
 
+  wasm-validator-tests:
+    name: Custom WASM Validator Tests
+    runs-on: ubuntu-latest
+    needs: policy-tests
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'tools/compliance-policy/package.json'
+
+      - name: Install dependencies
+        working-directory: tools/compliance-policy
+        run: |
+          npm install
+
+      - name: Run WASM Validator Registration & Execution Tests
+        working-directory: tools/compliance-policy
+        run: |
+          npx ts-node src/cli.ts validate-wasm --events ../../policies/compliance/fixtures/sample-events.json --validators ../../policies/compliance/fixtures/wasm-validators.json
+
+      - name: Verify WASM Validator Gas Metering
+        working-directory: tools/compliance-policy
+        run: |
+          npx ts-node src/cli.ts validate-wasm --events ../../policies/compliance/fixtures/sample-events.json --validators ../../policies/compliance/fixtures/wasm-validators.json --gas-report
+
   compliance-evaluation-and-drift:
     name: Continuous Compliance & Drift Detection
     runs-on: ubuntu-latest
-    needs: policy-tests
+    needs: wasm-validator-tests
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -75,4 +118,51 @@ jobs:
         with:
           name: compliance-audit-report
           path: docs/compliance/reports/
+          retention-days: 90
+
+  parallel-event-replay:
+    name: Parallel Contract Event Replay from Ledger
+    runs-on: ubuntu-latest
+    needs: compliance-evaluation-and-drift
+    if: github.event_name == 'workflow_dispatch' && inputs.replay-from-ledger
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'tools/compliance-policy/package.json'
+
+      - name: Install dependencies
+        working-directory: tools/compliance-policy
+        run: |
+          npm install
+
+      - name: Partition ledger history into replay work units
+        working-directory: tools/compliance-policy
+        run: |
+          npx ts-node src/cli.ts replay --events ../../policies/compliance/fixtures/sample-events.json --partition --workers ${{ inputs.replay-workers }} --checkpoint ../../${{ inputs.replay-checkpoint }} --output ../../docs/compliance/reports/replay-partitions.json
+
+      - name: Replay contract events in parallel with checkpoint coordination
+        working-directory: tools/compliance-policy
+        run: |
+          npx ts-node src/cli.ts replay --events ../../policies/compliance/fixtures/sample-events.json --workers ${{ inputs.replay-workers }} --checkpoint ../../${{ inputs.replay-checkpoint }} --progress --output ../../docs/compliance/reports/replay-state.json
+
+      - name: Verify reconstructed state against ledger
+        working-directory: tools/compliance-policy
+        run: |
+          npx ts-node src/cli.ts replay --events ../../policies/compliance/fixtures/sample-events.json --verify --checkpoint ../../${{ inputs.replay-checkpoint }} --output ../../docs/compliance/reports/replay-verification.json
+
+      - name: Upload Replay Progress & Verification Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-event-replay-report
+          path: |
+            docs/compliance/reports/replay-partitions.json
+            docs/compliance/reports/replay-state.json
+            docs/compliance/reports/replay-verification.json
+            ${{ inputs.replay-checkpoint }}
           retention-days: 90

@@ -18,9 +18,8 @@ describe("PaginationSchema", () => {
     expect(result).toEqual({ limit: 20, offset: 10 });
   });
 
-  it("caps limit at 1000", () => {
-    const result = PaginationSchema.parse({ limit: 5000 });
-    expect(result.limit).toBe(1000);
+  it("rejects limits above 1000", () => {
+    expect(() => PaginationSchema.parse({ limit: 5000 })).toThrow();
   });
 
   it("rejects negative offset", () => {

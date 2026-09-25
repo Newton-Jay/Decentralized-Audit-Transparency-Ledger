@@ -1968,6 +1968,33 @@ impl AuditLedger {
             }
         }
 
+        for i in 0..submitter_batch_counts.len() {
+            let (submitter, batch_count) = submitter_batch_counts.get(i).unwrap();
+            if env
+                .storage()
+                .instance()
+                .get::<_, u32>(&DataKey::SubmitterRateLimit(submitter.clone()))
+                .is_some()
+            {
+                let (last_ts, count): (u64, u32) = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::SubmitterRateState(submitter.clone()))
+                    .unwrap_or((0u64, 0u32));
+                let updated_count = if now == last_ts {
+                    match count.checked_add(batch_count) {
+                        Some(value) => value,
+                        None => panic_with_error!(&env, ContractError::RateLimitExceeded),
+                    }
+                } else {
+                    batch_count
+                };
+                env.storage()
+                    .instance()
+                    .set(&DataKey::SubmitterRateState(submitter), &(now, updated_count));
+            }
+        }
+
         let mut result_indices: Vec<u32> = Vec::new(&env);
         let mut current_total = total;
         let mut prev_hash: BytesN<32> = if current_total == 0 {

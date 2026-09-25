@@ -1,5 +1,10 @@
-import { Request, Response, NextFunction } from "express";
-import { ZodSchema, ZodError } from "zod";
+import type { ErrorObject } from "ajv";
+import type { NextFunction, Request, RequestHandler, Response } from "express";
+import {
+  getRequestValidator,
+  getResponseValidator,
+  type SchemaName,
+} from "../schema-registry";
 
 export interface ValidationError {
   field: string;
@@ -14,78 +19,100 @@ export interface ErrorResponse {
   };
 }
 
-export function validateQuery(schema: ZodSchema) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    try {
-      req.query = schema.parse(req.query);
-      next();
-    } catch (err) {
-      if (err instanceof ZodError) {
-        const details: ValidationError[] = err.errors.map((e) => ({
-          field: e.path.join("."),
-          message: e.message,
-        }));
-        const response: ErrorResponse = {
-          error: {
-            code: "VALIDATION_ERROR",
-            message: "Invalid query parameters",
-            details,
-          },
-        };
-        return res.status(400).json(response);
-      }
-      next(err);
-    }
+function errorField(error: ErrorObject): string {
+  const base = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+  const property =
+    error.keyword === "required"
+      ? (error.params as { missingProperty?: string }).missingProperty
+      : (error.params as { additionalProperty?: string }).additionalProperty;
+
+  return [base, property].filter(Boolean).join(".");
+}
+
+export function validationErrorResponse(
+  message: string,
+  errors: ErrorObject[] | null | undefined,
+  code = "VALIDATION_ERROR"
+): ErrorResponse {
+  return {
+    error: {
+      code,
+      message,
+      details: (errors ?? []).map((error) => ({
+        field: errorField(error),
+        message: error.message ?? "is invalid",
+      })),
+    },
   };
 }
 
-export function validateParams(schema: ZodSchema) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    try {
-      req.params = schema.parse(req.params) as any;
-      next();
-    } catch (err) {
-      if (err instanceof ZodError) {
-        const details: ValidationError[] = err.errors.map((e) => ({
-          field: e.path.join("."),
-          message: e.message,
-        }));
-        const response: ErrorResponse = {
-          error: {
-            code: "VALIDATION_ERROR",
-            message: "Invalid path parameters",
-            details,
-          },
-        };
-        return res.status(400).json(response);
-      }
-      next(err);
+export function validateQuery(name: SchemaName): RequestHandler {
+  const validator = getRequestValidator(name);
+
+  return (req, res, next) => {
+    const value = { ...req.query };
+    if (!validator(value)) {
+      return res
+        .status(400)
+        .json(validationErrorResponse("Invalid query parameters", validator.errors));
     }
+
+    res.locals.validatedQuery = value;
+    next();
   };
 }
 
-export function validateBody(schema: ZodSchema) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    try {
-      req.body = schema.parse(req.body);
-      next();
-    } catch (err) {
-      if (err instanceof ZodError) {
-        const details: ValidationError[] = err.errors.map((e) => ({
-          field: e.path.join("."),
-          message: e.message,
-        }));
-        const response: ErrorResponse = {
-          error: {
-            code: "VALIDATION_ERROR",
-            message: "Invalid request body",
-            details,
-          },
-        };
-        return res.status(400).json(response);
-      }
-      next(err);
+export function validateParams(name: SchemaName): RequestHandler {
+  const validator = getRequestValidator(name);
+
+  return (req, res, next) => {
+    const value = { ...req.params };
+    if (!validator(value)) {
+      return res
+        .status(400)
+        .json(validationErrorResponse("Invalid path parameters", validator.errors));
     }
+
+    res.locals.validatedParams = value;
+    next();
+  };
+}
+
+export function validateBody(name: SchemaName): RequestHandler {
+  const validator = getRequestValidator(name);
+
+  return (req, res, next) => {
+    if (!validator(req.body)) {
+      return res
+        .status(400)
+        .json(validationErrorResponse("Invalid request body", validator.errors));
+    }
+
+    res.locals.validatedBody = req.body;
+    next();
+  };
+}
+
+export function validateResponse(name: SchemaName): RequestHandler {
+  const validator = getResponseValidator(name);
+
+  return (_req, res, next) => {
+    const sendJson = res.json.bind(res) as Response["json"];
+    res.json = ((body: unknown) => {
+      if (res.statusCode < 400 && !validator(body)) {
+        res.status(500);
+        return sendJson(
+          validationErrorResponse(
+            "Response validation failed",
+            validator.errors,
+            "RESPONSE_VALIDATION_ERROR"
+          )
+        );
+      }
+
+      return sendJson(body);
+    }) as Response["json"];
+    next();
   };
 }
 
